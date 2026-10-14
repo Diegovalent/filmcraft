@@ -1,0 +1,70 @@
+name: Publicar FilmCraft Web
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: filmcraft-pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v4
+      - name: Instalar bibliotecas de compilação e testes
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libudev-dev libgtk-3-dev libxkbcommon-dev libwayland-dev libfontconfig1-dev libvulkan-dev mesa-vulkan-drivers ffmpeg
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+      - name: Verificar código, testes, camadas, licenças e WebAssembly
+        run: cargo xtask ci
+      - name: Instalar wasm-bindgen compatível com o código
+        run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
+      - name: Compilar o editor para navegador
+        run: cargo xtask web
+      - name: Conferir pacote e incluir licenças
+        run: |
+          test -s target/web/dist/index.html
+          test -s target/web/dist/filmcraft_web.js
+          test -s target/web/dist/filmcraft_web_bg.wasm
+          test -s target/web/dist/audio-worklet.js
+          cp LICENSE-MIT LICENSE-APACHE NOTICE ATTRIBUTION.md target/web/dist/
+          touch target/web/dist/.nojekyll
+      - name: Guardar versão web para download
+        uses: actions/upload-artifact@v4
+        with:
+          name: filmcraft-web
+          path: target/web/dist
+          retention-days: 7
+      - name: Preparar artefato do GitHub Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: target/web/dist
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/configure-pages@v5
+      - name: Publicar o editor
+        id: deployment
+        uses: actions/deploy-pages@v4
