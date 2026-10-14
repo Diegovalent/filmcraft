@@ -61,8 +61,19 @@ pub fn generate(out: &Path, make: impl FnOnce(&Path) -> bool) -> Option<PathBuf>
         let _ = std::fs::remove_file(&tmp);
         return None;
     }
-    std::fs::rename(&tmp, out).ok()?;
-    Some(out.to_path_buf())
+    match std::fs::rename(&tmp, out) {
+        Ok(()) => Some(out.to_path_buf()),
+        Err(_) if std::fs::metadata(out).is_ok_and(|m| m.len() > 0) => {
+            // Another concurrent generator won the race. On Windows, rename
+            // does not replace an existing destination, unlike Unix.
+            let _ = std::fs::remove_file(&tmp);
+            Some(out.to_path_buf())
+        }
+        Err(_) => {
+            let _ = std::fs::remove_file(&tmp);
+            None
+        }
+    }
 }
 
 /// Status of one fixture for `cargo xtask fixtures`.
