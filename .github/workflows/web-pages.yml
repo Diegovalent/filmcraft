@@ -30,7 +30,8 @@ jobs:
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
       - name: Restaurar cache de compilação
-        uses: actions/cache@v4
+        id: rust-cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cargo/registry
@@ -73,6 +74,16 @@ jobs:
         uses: actions/upload-pages-artifact@v3
         with:
           path: target/web/dist
+      - name: Salvar compilação mesmo se uma verificação falhar
+        if: ${{ !cancelled() && steps.rust-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/wasm-bindgen*
+            target
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
   deploy:
     needs: build
     runs-on: ubuntu-latest
