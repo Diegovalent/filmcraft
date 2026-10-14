@@ -1,0 +1,153 @@
+name: Instalador Windows pessoal
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/windows-personal.yml
+      - Cargo.lock
+      - Cargo.toml
+      - packaging/windows/**
+      - crates/**
+      - apps/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-personal-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-2025
+    timeout-minutes: 180
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+      FILMCRAFT_BUILD_SHA: ${{ github.sha }}
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          targets: x86_64-pc-windows-msvc, wasm32-unknown-unknown
+          components: rustfmt, clippy
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: filmcraft-windows-${{ runner.os }}-${{ hashFiles('Cargo.lock', '.github/workflows/windows-personal.yml') }}
+          restore-keys: |
+            filmcraft-windows-${{ runner.os }}-
+      - name: Install pinned WiX packaging tools
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          if ($LASTEXITCODE -ne 0) { throw 'WiX installation failed' }
+          wix extension add -g WixToolset.UI.wixext/5.0.2 WixToolset.Util.wixext/5.0.2
+          if ($LASTEXITCODE -ne 0) { throw 'WiX extension installation failed' }
+      - name: Install test tools with APV support
+        shell: pwsh
+        run: |
+          choco install ffmpeg-shared --version=8.0.1 --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { throw 'FFmpeg test tool installation failed' }
+          $ff = Get-ChildItem "$env:ChocolateyInstall/lib/ffmpeg-shared" -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          $probe = Get-ChildItem "$env:ChocolateyInstall/lib/ffmpeg-shared" -Recurse -Filter ffprobe.exe | Select-Object -First 1
+          if (-not $ff -or -not $probe) { throw 'Test tools missing' }
+          "FILMCRAFT_FFMPEG=$($ff.FullName)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "FILMCRAFT_FFPROBE=$($probe.FullName)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          & $probe.FullName -version
+          $formats = & $probe.FullName -hide_banner -formats
+          if ($LASTEXITCODE -ne 0 -or -not ($formats -match '\s+apv\s+')) { throw 'ffprobe must support APV' }
+      - name: Verify code, tests and WebAssembly
+        env:
+          CARGO_PROFILE_RELEASE_LTO: "false"
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: "1"
+        run: cargo xtask ci
+      - name: Build installer and portable package
+        shell: pwsh
+        run: |
+          $env:FILMCRAFT_BUILD_DATE = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd')
+          ./packaging/windows/package.ps1 -Arch x64
+          if ($LASTEXITCODE -ne 0) { throw 'Windows packaging failed' }
+      - name: Install MSI and test installed executable
+        shell: pwsh
+        run: |
+          $msi = (Get-ChildItem dist/release/*-windows-x64.msi | Select-Object -First 1).FullName
+          $install = Join-Path $env:RUNNER_TEMP 'FilmCraft-installed'
+          $log = Join-Path $env:RUNNER_TEMP 'filmcraft-msi-install.log'
+          $args = @('/i', "`"$msi`"", '/qn', '/norestart', "INSTALLFOLDER=`"$install`"", '/L*v', "`"$log`"")
+          $p = Start-Process msiexec.exe -ArgumentList $args -Wait -PassThru
+          if ($p.ExitCode -notin @(0, 3010)) {
+            Get-Content $log -Tail 100
+            throw "MSI install failed: $($p.ExitCode)"
+          }
+          $cli = Join-Path $install 'filmcraft-cli.exe'
+          if (-not (Test-Path (Join-Path $install 'filmcraft.exe'))) { throw 'Installed GUI missing' }
+          & $cli --version
+          if ($LASTEXITCODE -ne 0) { throw 'Installed CLI failed to start' }
+          $p = Start-Process msiexec.exe -ArgumentList @('/x', "`"$msi`"", '/qn', '/norestart') -Wait -PassThru
+          if ($p.ExitCode -notin @(0, 3010)) { throw "MSI uninstall failed: $($p.ExitCode)" }
+      - name: Generate checksums and release notes
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem dist/release/* | Where-Object { $_.Extension -in @('.msi', '.zip') }
+          if ($files.Count -ne 2) { throw 'Expected one MSI and one portable ZIP' }
+          $files | Sort-Object Name | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)"
+          } | Set-Content dist/release/SHA256SUMS.txt -Encoding ascii
+          @"
+          Compilação independente de Diegovalent, baseada no FilmCraft da equipe ArtCraft.
+
+          Windows 64 bits Intel/AMD: baixe o arquivo **windows-x64.msi** para instalar.
+          Alternativa: extraia o **windows-x64-portable.zip** e abra filmcraft.exe.
+
+          Validação: cargo xtask ci, instalação/desinstalação MSI e inicialização da CLI instalada.
+          A interface gráfica no computador do usuário ainda precisa ser validada.
+
+          **Sem assinatura digital.** O Windows pode exibir aviso ou bloquear conforme sua política. Não desative o antivírus nem controles de segurança.
+          O aplicativo está em alfa; preserve cópias dos arquivos. Testes e checksums não constituem certificação de segurança.
+
+          Código-fonte: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/commit/$env:GITHUB_SHA
+          Execução: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID
+          "@ | Set-Content dist/release/RELEASE-NOTES.md -Encoding utf8
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: filmcraft-windows-x64
+          path: dist/release/
+          if-no-files-found: error
+          retention-days: 14
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: filmcraft-windows-x64
+          path: release
+      - name: Verify files and publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          cd release
+          sha256sum --check SHA256SUMS.txt
+          tag="windows-pessoal-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
+          gh release create "$tag" \
+            --target "$GITHUB_SHA" \
+            --title "FilmCraft Windows — compilação pessoal ${GITHUB_RUN_NUMBER}" \
+            --notes-file RELEASE-NOTES.md \
+            --latest \
+            ./*.msi ./*.zip ./SHA256SUMS.txt
