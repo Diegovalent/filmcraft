@@ -16,11 +16,15 @@ pub fn dir() -> PathBuf {
 pub fn fixture(ff: &Path, name: &str, args: &[&str]) -> Option<PathBuf> {
     let out = dir().join(name);
     filmcraft_testkit::fixtures::generate(&out, |tmp| {
-        let st = Command::new(ff).args(["-y", "-v", "error"]).args(args).arg(tmp).stdin(Stdio::null()).status();
-        match st {
-            Ok(s) if s.success() => true,
-            other => {
-                eprintln!("fixture {name}: ffmpeg failed: {other:?}");
+        let result = Command::new(ff).args(["-y", "-v", "error"]).args(args).arg(tmp).stdin(Stdio::null()).output();
+        match result {
+            Ok(output) if output.status.success() => true,
+            Ok(output) => {
+                eprintln!("fixture {name}: ffmpeg exited {}: {}", output.status, String::from_utf8_lossy(&output.stderr));
+                false
+            }
+            Err(error) => {
+                eprintln!("fixture {name}: could not run ffmpeg: {error}");
                 false
             }
         }
