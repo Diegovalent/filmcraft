@@ -188,14 +188,45 @@ const FH: usize = 60;
 
 /// Every video frame of `input`, scaled to 80×60 in `pix_fmt` (`gray` or `rgb24`). `vf` goes
 /// first in the filter chain (e.g. `fps=30` to see a VFR file as an editor shows it).
+/// For gray comparisons, decode through RGB and a common BT.601 matrix: reading the Y plane
+/// directly compares different luma weights when an SD BT.601 source is exported as BT.709.
 fn frames(ffmpeg: &Path, input: &str, vf: Option<&str>, pix_fmt: &str) -> Vec<Vec<u8>> {
+    let convert = if pix_fmt == "gray" { "format=rgb24," } else { "" };
     let chain = match vf {
-        Some(f) => format!("{f},scale={FW}:{FH}:flags=area,format={pix_fmt}"),
-        None => format!("scale={FW}:{FH}:flags=area,format={pix_fmt}"),
+        Some(f) => format!("{f},{convert}scale={FW}:{FH}:flags=area:out_color_matrix=bt601,format={pix_fmt}"),
+        None => format!("{convert}scale={FW}:{FH}:flags=area:out_color_matrix=bt601,format={pix_fmt}"),
     };
     let bpp = if pix_fmt == "gray" { 1 } else { 3 };
     let raw = ffmpeg_raw(ffmpeg, &[], input, &["-map", "0:v:0", "-vf", &chain, "-fps_mode", "passthrough", "-f", "rawvideo"]);
     raw.chunks_exact(FW * FH * bpp).map(<[u8]>::to_vec).collect()
+}
+
+/// The picture oracle must compare displayed pixels, not incompatible BT.601/BT.709 Y planes.
+#[test]
+fn gray_oracle_normalizes_source_and_export_color_matrices() {
+    let (ffmpeg, _) = filmcraft_testkit::require_oracles!();
+    let dir = Scratch::new("gray-matrices");
+    let src = dir.path("source601.mp4");
+    let converted = dir.path("converted709.mp4");
+    let status = Command::new(&ffmpeg)
+        .args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=30:duration=1"])
+        .args(["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", &src])
+        .status()
+        .unwrap();
+    assert!(status.success(), "generate BT.601 source");
+    let status = Command::new(&ffmpeg)
+        .args(["-v", "error", "-y", "-i", &src, "-vf", "scale=in_color_matrix=bt601:out_color_matrix=bt709"])
+        .args(["-c:v", "libx264", "-crf", "10", "-colorspace", "bt709", "-color_trc", "bt709", "-color_primaries", "bt709", &converted])
+        .status()
+        .unwrap();
+    assert!(status.success(), "convert the same picture to BT.709");
+    let original = frames(&ffmpeg, &src, None, "gray");
+    let converted = frames(&ffmpeg, &converted, None, "gray");
+    assert_eq!(original.len(), 30);
+    assert_eq!(converted.len(), original.len());
+    for (index, (a, b)) in original.iter().zip(&converted).enumerate() {
+        assert!(diff(a, b) < 6.0, "color-matrix conversion changed frame {index}: {}", diff(a, b));
+    }
 }
 
 /// Mean absolute difference of two equally sized frames.
