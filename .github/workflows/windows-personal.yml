@@ -57,10 +57,16 @@ jobs:
       - name: Install test tools with APV support
         shell: pwsh
         run: |
-          choco install ffmpeg-shared --version=8.0.1 --yes --no-progress
-          if ($LASTEXITCODE -ne 0) { throw 'FFmpeg test tool installation failed' }
-          $ff = Get-ChildItem "$env:ChocolateyInstall/lib/ffmpeg-shared" -Recurse -Filter ffmpeg.exe | Select-Object -First 1
-          $probe = Get-ChildItem "$env:ChocolateyInstall/lib/ffmpeg-shared" -Recurse -Filter ffprobe.exe | Select-Object -First 1
+          $archive = Join-Path $env:RUNNER_TEMP 'ffmpeg-8.0.1-full_build-shared.zip'
+          $toolsDir = Join-Path $env:RUNNER_TEMP 'filmcraft-test-tools'
+          Invoke-WebRequest -Uri 'https://github.com/GyanD/codexffmpeg/releases/download/8.0.1/ffmpeg-8.0.1-full_build-shared.zip' -OutFile $archive
+          $expected = 'e4a40b46e3a3f3e5f2ed28352bd1fd6c733ae3808a8743682ef7f0d4e20c7d51'
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) {
+            throw 'FFmpeg test archive checksum mismatch'
+          }
+          Expand-Archive -Path $archive -DestinationPath $toolsDir -Force
+          $ff = Get-ChildItem $toolsDir -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          $probe = Get-ChildItem $toolsDir -Recurse -Filter ffprobe.exe | Select-Object -First 1
           if (-not $ff -or -not $probe) { throw 'Test tools missing' }
           "FILMCRAFT_FFMPEG=$($ff.FullName)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "FILMCRAFT_FFPROBE=$($probe.FullName)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
