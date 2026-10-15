@@ -86,7 +86,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Formatting failed' }
           cargo clippy --workspace --all-targets --release -- -D warnings
           if ($LASTEXITCODE -ne 0) { throw 'Clippy failed' }
-          cargo test --workspace --release -- --skip gpu_blend_modes_match_cpu_render --skip gpu_effect_chains_match_cpu_render --skip gpu_matches_cpu_on_golden_scenes --skip gpu_transition_of_blended_clips_matches_cpu_render
+          # Hosted Windows runners use an unreliable software D3D shader compiler.\n          # Compile filmcraft-gpu with Clippy above, but run its runtime tests on GPU-capable machines.\n          cargo test --workspace --exclude filmcraft-gpu --release -- --skip gpu_blend_modes_match_cpu_render --skip gpu_effect_chains_match_cpu_render --skip gpu_matches_cpu_on_golden_scenes --skip gpu_transition_of_blended_clips_matches_cpu_render
           if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
           cargo xtask layers
           if ($LASTEXITCODE -ne 0) { throw 'Layer checks failed' }
